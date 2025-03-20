@@ -3,7 +3,9 @@ import onnxruntime as rt
 import numpy as np
 from onnx import numpy_helper
 import time
+import logging
 
+logger = logging.getLogger('onnxruntime')
 
 def calculate_params(model: onnx.ModelProto) -> int:
     onnx_weights = model.graph.initializer
@@ -63,7 +65,8 @@ def calculate_macs(model: onnx.ModelProto) -> int:
     }
 
     def to_dims(v: onnx.ValueInfoProto) -> [int]:
-        return [i.dim_value for i in v.type.tensor_type.shape.dim]
+    # Weird fix
+        return [i.dim_value if i.dim_value != 0 else 1 for i in v.type.tensor_type.shape.dim]
 
     for graph_input in model.graph.input:
         if graph_input.name not in graph_weights:
@@ -96,7 +99,7 @@ def calculate_macs(model: onnx.ModelProto) -> int:
                          **{i.name: to_dims(i) for i in shaped_model.graph.output},
                          }
     except onnx.shape_inference.InferenceError as e:
-        print("Shape inference failure:", e)
+        logger.log(logging.ERROR,"Shape inference failure:", e)
 
         onnx.save(model, '+all-intermediate.onnx')
 
@@ -107,7 +110,7 @@ def calculate_macs(model: onnx.ModelProto) -> int:
         sess = rt.InferenceSession('+all-intermediate.onnx', providers=[provider])
         start = time.time()
         output = sess.run(list(graph_outputs.keys()), input_sample)
-        print("inference(s):", time.time() - start)
+        logger.log(logging.INFO,"inference(s):", time.time() - start)
 
         output_shapes = {**{k: input_sample[k].shape for k in input_sample},
                         **{i: output[output_mapping[i]].shape for i in output_mapping}
@@ -152,6 +155,9 @@ def calculate_macs(model: onnx.ModelProto) -> int:
     def no_macs(*args, **kwargs):
         return 0
 
+    def global_average_pool_macs(node, input_shape, output_shape, attrs):
+        return input_shape[1]*input_shape[0]
+
     mac_calculators = {
         'Conv': conv_macs,
         'ConvTranspose': conv_macs,
@@ -173,6 +179,9 @@ def calculate_macs(model: onnx.ModelProto) -> int:
         'Unsqueeze': no_macs,
         'Split': no_macs,
         'Cast': no_macs,
+        'GlobalAveragePool': global_average_pool_macs,
+        'Clip': no_macs,
+        'Flatten': no_macs,
         'Upsample': upsample_macs,
         'Resize': upsample_macs,
     }
@@ -192,7 +201,7 @@ def calculate_macs(model: onnx.ModelProto) -> int:
             macs += np.prod(node_output_shape)
             if node.op_type in unsupported_ops:
                 continue
-            print("Unsupported op:", node.op_type)
+            logger.warning(f"Unsupported op:{node.op_type}")
             unsupported_ops.add(node.op_type)
 
     return macs
